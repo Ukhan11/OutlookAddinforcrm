@@ -1,80 +1,99 @@
-Office.onReady(function () {
-    // Set up onItemSend event handler
-    Office.context.mailbox.item.addHandlerAsync(
-        Office.EventType.ItemSend,
-        onItemSendHandler
+Office.initialize = function () {
+    if (Office.context.mailbox.diagnostics.hostName === 'Outlook') {
+        Office.context.mailbox.item.addHandlerAsync(
+            Office.EventType.AppointmentSend,
+            onAppointmentSendHandler
+        );
+    }
+}
+
+function onAppointmentSendHandler(eventArgs) {
+    eventArgs.preventDefault();
+
+    // Get a callback token with REST permissions.
+    Office.context.mailbox.getCallbackTokenAsync({ isRest: true }, function (result) {
+        if (result.status === "succeeded") {
+            const accessToken = result.value;
+
+            // Use the access token to get the current appointment and send it to CRM.
+            getCurrentItem(accessToken);
+        } else {
+            console.log('Error getting callback token with REST permissions');
+        }
+    });
+}
+
+function getCurrentItem(accessToken) {
+    // Get the item's REST ID.
+    const itemId = getItemRestId();
+    const getAppointmentUrl = `${Office.context.mailbox.restUrl}/v2.0/me/events/${itemId}`;
+
+    $.ajax({
+        url: getAppointmentUrl,
+        dataType: 'json',
+        headers: { 'Authorization': `Bearer ${accessToken}` }
+    }).done(function (item) {
+        // Appointment is passed in `item`.
+        const appointment = item;
+
+        // Send the appointment to CRM.
+        sendAppointmentToCRM(appointment, accessToken);
+    }).fail(function (error) {
+        console.log(`Error getting appointment from Office REST API: ${error.responseText}`);
+    });
+}
+
+function sendAppointmentToCRM(appointment, accessToken) {
+    // Connect to CRM.
+    const service = ConnectToMSCRM(
+        'clientid',
+        'client secret',
+        'crm url',
+        'tenantid',
+        "accounts"
     );
-});
 
-function onItemSendHandler(eventArgs)
-{
-    // Get the meeting subject and organizer
-    var subject = Office.context.mailbox.item.subject;
-    var organizer = Office.context.mailbox.item.organizer.displayName;
+    // Create a new CRM appointment from the Office appointment.
+    const newAppointment = {
+        subject: appointment.Subject,
+        description: appointment.Body.Content,
+        // Add other appointment properties as needed.
+    };
 
-    // Get the access token
-    getAccessToken(function (accessToken) {
-        // Create the CRM record
-        createCrmRecord(subject, organizer, accessToken);
+    // Get the organizer of the appointment.
+    const organizer = appointment.Organizer.EmailAddress.Name;
+
+    // Store the subject and organizer in the account table in CRM.
+    const table = {
+        name: appointment.Subject,
+        description: `Organized by ${organizer}`,
+        // Add other fields as needed.
+    };
+
+    // Send the new appointment and account to CRM.
+    service.Create(newAppointment, function (result) {
+        console.log(`Appointment sent to CRM with ID ${result.id}`);
+
+        // Get the ID of the new appointment.
+        const appointmentId = result.id;
+
+        // Set the account ID to the ID of the new appointment.
+        table.accountid = appointmentId;
+
+        service.Create(table, function (result) {
+            console.log(`Account stored in CRM table with ID ${result.id}`);
+        }, function (error) {
+            console.log(`Error storing account in CRM table: ${error.message}`);
+        });
+
+    }, function (error) {
+        console.log(`Error sending appointment to CRM: ${error.message}`);
     });
 }
 
-function getAccessToken(callback) {
-    // Configure MSAL.js
-    const msalConfig = {
-        auth: {
-            clientId: 'clientid',
-            authority: 'https://login.microsoftonline.com/tennatId',
-        },
-        cache: {
-            cacheLocation: 'localStorage',
-            storeAuthStateInCookie: true
-        }
-    };
-    const msalInstance = new msal.PublicClientApplication(msalConfig);
-
-    // Get the access token
-    msalInstance.acquireTokenSilent({
-        scopes: ['crmurl.default']
-    }).then(function (authResult) {
-        const accessToken = authResult.accessToken;
-        callback(accessToken);
-    }).catch(function (error) {
-        console.error(error);
-    });
-}
-
-function createCrmRecord(subject, organizer, accessToken) {
-    // TODO: Implement your code to create the CRM record using the Web API.
-    // For example:
-
-    var endpointUrl = "crmurl/entityname";
-    var payload = {
-        "callsubject": subject,
-        "name": organizer
-    };
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", endpointUrl);
-    xhr.setRequestHeader("Authorization", "Bearer " + accessToken);
-    xhr.setRequestHeader("Content-Type", "application/json; charset=utf-8");
-    xhr.setRequestHeader("OData - MaxVersion", "4.0");
-    xhr.setRequestHeader("OData-Version", "4.0");
-    xhr.setRequestHeader("Prefer", "return=representation");
-
-    xhr.onreadystatechange = function () {
-        if (xhr.readyState === 4) {
-            if (xhr.status === 204) {
-                console.log("Record created successfully.");
-            } else {
-                console.log("Error creating record: " + xhr.statusText);
-            }
-        }
-    };
-    xhr.send(JSON.stringify(payload));
-}
 
 
 
 if (Office.context.platform === Office.PlatformType.PC || Office.context.platform == null) {
-    Office.actions.associate("onAppointmentSendHandler", onItemSendHandler);
+    Office.actions.associate("onAppointmentSendHandler", onAppointmentSendHandler);
 }
